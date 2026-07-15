@@ -1,2 +1,148 @@
 <!doctype html>
-<html><body><h1>Chinese Pinyin Flashcard — under construction</h1></body></html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chinese Pinyin Flashcard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; text-align: center; }
+  #hanzi { font-size: 72px; margin: 24px 0; }
+  #answer { font-size: 24px; padding: 8px; width: 200px; text-align: center; }
+  #result { margin-top: 16px; min-height: 90px; }
+  .tier-5 { color: #1a7f37; }
+  .tier-3 { color: #9a6700; }
+  .tier-1 { color: #cf222e; }
+  #progress { color: #666; margin-top: 24px; }
+  button { font-size: 16px; padding: 6px 14px; margin: 0 4px; }
+</style>
+</head>
+<body>
+  <div id="progress">Loading…</div>
+  <div id="hanzi">…</div>
+  <form id="answer-form">
+    <input id="answer" autocomplete="off" placeholder="pinyin, e.g. xing2 or xíng">
+    <button type="submit">Check</button>
+  </form>
+  <div id="result"></div>
+
+<script src="lib/pinyin.js"></script>
+<script>
+const LS = { cards: 'cn_cards', session: 'cn_session', idx: 'cn_idx', srs: 'cn_srs' };
+let cards = [], sessionKey = null, idx = 0, srs = {};
+
+function parseCSV(text) {
+  const lines = [];
+  let row = [''], inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], nx = text[i + 1];
+    if (c === '"') { if (inQ && nx === '"') { row[row.length - 1] += '"'; i++; } else inQ = !inQ; }
+    else if (c === ',' && !inQ) row.push('');
+    else if ((c === '\n' || c === '\r') && !inQ) { if (c === '\r' && nx === '\n') i++; lines.push(row); row = ['']; }
+    else row[row.length - 1] += c;
+  }
+  if (row.length > 1 || row[0]) lines.push(row);
+  if (lines.length < 2) return [];
+  return lines.slice(1)
+    .filter(l => l.length >= 4 && l[0].trim())
+    .map(l => ({ hanzi: l[0].trim(), pinyin: l[1].trim(), meaning: l[2].trim(), sentence: (l[3] || '').trim() }));
+}
+
+async function loadLatestSession() {
+  const manifest = await (await fetch('sessions.json')).json();
+  if (!manifest.length) { document.getElementById('progress').textContent = 'No sessions yet — add words via the Telegram bot.'; return; }
+  const latest = manifest[manifest.length - 1];
+  const text = await (await fetch(latest.file)).text();
+  cards = parseCSV(text);
+  sessionKey = latest.file;
+  loadSRS();
+  idx = parseInt(localStorage.getItem(LS.idx), 10) || 0;
+  if (idx >= cards.length) idx = 0;
+  renderCard();
+}
+
+function loadSRS() {
+  const raw = localStorage.getItem(LS.srs);
+  srs = raw ? JSON.parse(raw) : {};
+}
+function saveSRS() { localStorage.setItem(LS.srs, JSON.stringify(srs)); }
+function cardKey(card) { return `${card.hanzi}|${card.pinyin}`; }
+
+// Same SM-2 math as the Korean flashcard app's rateCard(), driven here by
+// matchPinyin()'s 1/3/5 tier instead of a tap.
+function rateCard(card, rating) {
+  const key = cardKey(card);
+  const stat = srs[key] || (srs[key] = { rating: 0, rep: 0, interval: 0, efactor: 2.5, dueDate: 0 });
+  stat.rating = rating;
+  if (rating >= 3) {
+    stat.interval = stat.rep === 0 ? 1 : stat.rep === 1 ? 6 : Math.round(stat.interval * stat.efactor);
+    stat.rep++;
+  } else {
+    stat.rep = 0; stat.interval = 1;
+  }
+  stat.efactor = Math.max(1.3, stat.efactor + 0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02));
+  stat.dueDate = Date.now() + stat.interval * 86400000;
+  saveSRS();
+  syncReview(card, rating);
+}
+
+let syncChain = Promise.resolve();
+function syncReview(card, rating) {
+  const body = JSON.stringify({
+    action: rating <= 2 ? 'forgot' : 'remove',
+    hanzi: card.hanzi, pinyin: card.pinyin, meaning: card.meaning, sentence: card.sentence,
+  });
+  syncChain = syncChain.then(() =>
+    fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {})
+  );
+}
+
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  const voices = window.speechSynthesis.getVoices();
+  const v = voices.find(v => v.lang.startsWith('zh'));
+  if (v) utt.voice = v;
+  utt.lang = 'zh-CN';
+  window.speechSynthesis.speak(utt);
+}
+
+function renderCard() {
+  if (!cards.length) return;
+  const card = cards[idx];
+  document.getElementById('hanzi').textContent = card.hanzi;
+  document.getElementById('answer').value = '';
+  document.getElementById('result').innerHTML = '';
+  document.getElementById('progress').textContent = `${idx + 1} / ${cards.length}`;
+  localStorage.setItem(LS.idx, idx);
+  document.getElementById('answer').focus();
+}
+
+document.getElementById('answer-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const card = cards[idx];
+  const input = document.getElementById('answer').value;
+  const rating = window.matchPinyin(input, card.pinyin);
+  rateCard(card, rating);
+  speak(card.hanzi);
+
+  const label = rating === 5 ? 'Correct!' : rating === 3 ? 'Close — right sound, wrong tone' : 'Not quite';
+  document.getElementById('result').innerHTML = `
+    <div class="tier-${rating}"><b>${label}</b></div>
+    <div>${card.pinyin} — ${card.meaning}</div>
+    <div>${card.sentence}</div>
+    <button id="tts-btn" type="button">🔊 Play</button>
+    <div style="margin-top:12px"><button id="next-btn" type="button">Next →</button></div>
+  `;
+  document.getElementById('tts-btn').onclick = () => speak(card.hanzi);
+  document.getElementById('next-btn').onclick = () => { idx = (idx + 1) % cards.length; renderCard(); };
+});
+
+if (window.speechSynthesis && window.speechSynthesis.onvoiceschanged !== undefined) {
+  window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+}
+
+loadLatestSession();
+</script>
+</body>
+</html>
